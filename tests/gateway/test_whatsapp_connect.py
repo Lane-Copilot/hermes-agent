@@ -204,7 +204,9 @@ class TestFileHandleClosedOnError:
         patches = _connect_patches(mock_proc, mock_fh)
 
         with patches[0], patches[1], patches[2], patches[3], patches[4], \
-             patches[5], patches[6], patches[7]:
+             patches[5], patches[6], patches[7], \
+             patch("gateway.status.acquire_scoped_lock", return_value=(True, None)), \
+             patch("gateway.status.release_scoped_lock"):
             result = await adapter.connect()
 
         assert result is False
@@ -246,6 +248,7 @@ class TestBridgeRuntimeFailure:
         adapter._http_session = AsyncMock()
         adapter._http_session.closed = False
         adapter._http_session.close = AsyncMock()
+        session = adapter._http_session
         mock_fh = MagicMock()
         adapter._bridge_log_fh = mock_fh
         adapter._schedule_bridge_reconnect = MagicMock()
@@ -262,7 +265,8 @@ class TestBridgeRuntimeFailure:
         assert result.error == "WhatsApp bridge is reconnecting"
         assert adapter.fatal_error_code is None
         adapter._schedule_bridge_reconnect.assert_called_once()
-        adapter._http_session.close.assert_awaited_once()
+        session.close.assert_awaited_once()
+        assert adapter._http_session is None
         mock_fh.close.assert_called_once()
         assert adapter._bridge_log_fh is None
 
@@ -273,6 +277,7 @@ class TestBridgeRuntimeFailure:
         adapter._http_session = AsyncMock()
         adapter._http_session.closed = False
         adapter._http_session.close = AsyncMock()
+        session = adapter._http_session
         mock_fh = MagicMock()
         adapter._bridge_log_fh = mock_fh
         adapter._schedule_bridge_reconnect = MagicMock()
@@ -288,7 +293,8 @@ class TestBridgeRuntimeFailure:
         assert adapter.fatal_error_code is None
         assert adapter._bridge_process is None
         adapter._schedule_bridge_reconnect.assert_called_once()
-        adapter._http_session.close.assert_awaited_once()
+        session.close.assert_awaited_once()
+        assert adapter._http_session is None
         mock_fh.close.assert_called_once()
         assert adapter._bridge_log_fh is None
 
@@ -305,7 +311,9 @@ class TestBridgeRuntimeFailure:
         patches = _connect_patches(mock_proc, mock_fh, mock_client_cls)
 
         with patches[0], patches[1], patches[2], patches[3], patches[4], \
-             patches[5], patches[6], patches[7], patches[8]:
+             patches[5], patches[6], patches[7], patches[8], \
+             patch("gateway.status.acquire_scoped_lock", return_value=(True, None)), \
+             patch("gateway.status.release_scoped_lock"):
             result = await adapter.connect()
 
         assert result is False
@@ -336,7 +344,9 @@ class TestBridgeRuntimeFailure:
         patches = _connect_patches(mock_proc, mock_fh, mock_client_cls)
 
         with patches[0], patches[1], patches[2], patches[3], patches[4], \
-             patches[5], patches[6], patches[7], patches[8]:
+             patches[5], patches[6], patches[7], patches[8], \
+             patch("gateway.status.acquire_scoped_lock", return_value=(True, None)), \
+             patch("gateway.status.release_scoped_lock"):
             result = await adapter.connect()
 
         assert result is False
@@ -351,6 +361,8 @@ class TestBridgeRuntimeFailure:
         mock_fh = MagicMock()
 
         with patch("gateway.platforms.whatsapp.check_whatsapp_requirements", return_value=True), \
+             patch("gateway.status.acquire_scoped_lock", return_value=(True, None)), \
+             patch("gateway.status.release_scoped_lock"), \
              patch.object(Path, "exists", return_value=True), \
              patch.object(Path, "mkdir", return_value=None), \
              patch("subprocess.run", return_value=MagicMock(returncode=0)), \
