@@ -51,6 +51,7 @@ def _make_adapter():
     adapter._bridge_log_fh = None
     adapter._bridge_log = None
     adapter._bridge_process = None
+    adapter._bridge_reconnect_task = None
     adapter._reply_prefix = None
     adapter._running = False
     adapter._message_handler = None
@@ -236,17 +237,20 @@ class TestConnectCleanup:
 
 
 class TestBridgeRuntimeFailure:
-    """Verify runtime bridge death is surfaced as a fatal adapter error."""
+    """Verify managed bridge death triggers reconnect instead of fataling."""
 
     @pytest.mark.asyncio
-    async def test_send_marks_retryable_fatal_when_managed_bridge_exits(self):
+    async def test_send_returns_reconnecting_error_when_managed_bridge_exits(self):
         adapter = _make_adapter()
-        fatal_handler = AsyncMock()
-        adapter.set_fatal_error_handler(fatal_handler)
         adapter._running = True
-        adapter._http_session = MagicMock()  # Persistent session active
+        adapter._http_session = AsyncMock()
+        adapter._http_session.closed = False
+        adapter._http_session.close = AsyncMock()
         mock_fh = MagicMock()
         adapter._bridge_log_fh = mock_fh
+        adapter._schedule_bridge_reconnect = MagicMock()
+        adapter._release_platform_lock = MagicMock()
+        adapter._mark_disconnected = MagicMock()
 
         mock_proc = MagicMock()
         mock_proc.poll.return_value = 7
@@ -255,22 +259,25 @@ class TestBridgeRuntimeFailure:
         result = await adapter.send("chat-123", "hello")
 
         assert result.success is False
-        assert "exited unexpectedly" in result.error
-        assert adapter.fatal_error_code == "whatsapp_bridge_exited"
-        assert adapter.fatal_error_retryable is True
-        fatal_handler.assert_awaited_once()
+        assert result.error == "WhatsApp bridge is reconnecting"
+        assert adapter.fatal_error_code is None
+        adapter._schedule_bridge_reconnect.assert_called_once()
+        adapter._http_session.close.assert_awaited_once()
         mock_fh.close.assert_called_once()
         assert adapter._bridge_log_fh is None
 
     @pytest.mark.asyncio
-    async def test_poll_messages_marks_retryable_fatal_when_managed_bridge_exits(self):
+    async def test_poll_messages_schedules_reconnect_when_managed_bridge_exits(self):
         adapter = _make_adapter()
-        fatal_handler = AsyncMock()
-        adapter.set_fatal_error_handler(fatal_handler)
         adapter._running = True
-        adapter._http_session = MagicMock()  # Persistent session active
+        adapter._http_session = AsyncMock()
+        adapter._http_session.closed = False
+        adapter._http_session.close = AsyncMock()
         mock_fh = MagicMock()
         adapter._bridge_log_fh = mock_fh
+        adapter._schedule_bridge_reconnect = MagicMock()
+        adapter._release_platform_lock = MagicMock()
+        adapter._mark_disconnected = MagicMock()
 
         mock_proc = MagicMock()
         mock_proc.poll.return_value = 23
@@ -278,9 +285,10 @@ class TestBridgeRuntimeFailure:
 
         await adapter._poll_messages()
 
-        assert adapter.fatal_error_code == "whatsapp_bridge_exited"
-        assert adapter.fatal_error_retryable is True
-        fatal_handler.assert_awaited_once()
+        assert adapter.fatal_error_code is None
+        assert adapter._bridge_process is None
+        adapter._schedule_bridge_reconnect.assert_called_once()
+        adapter._http_session.close.assert_awaited_once()
         mock_fh.close.assert_called_once()
         assert adapter._bridge_log_fh is None
 
