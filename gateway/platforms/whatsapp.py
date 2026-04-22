@@ -158,6 +158,9 @@ class WhatsAppAdapter(BasePlatformAdapter):
     # WhatsApp message limits — practical UX limit, not protocol max.
     # WhatsApp allows ~65K but long messages are unreadable on mobile.
     MAX_MESSAGE_LENGTH = 4096
+
+    # Internal sentinel used while a managed bridge is being restarted.
+    _BRIDGE_RESTARTING_SENTINEL = "__bridge_restarting__"
     
     # Default bridge location relative to the hermes-agent install
     _DEFAULT_BRIDGE_DIR = Path(__file__).resolve().parents[2] / "scripts" / "whatsapp-bridge"
@@ -547,7 +550,10 @@ class WhatsAppAdapter(BasePlatformAdapter):
             self._bridge_log_fh = None
 
     async def _check_managed_bridge_exit(self) -> Optional[str]:
-        """Return a fatal error message if the managed bridge child exited."""
+        """Handle managed bridge child exit.
+
+        Recoverable exits schedule a reconnect instead of setting a fatal error.
+        """
         if self._bridge_process is None:
             return None
 
@@ -556,11 +562,17 @@ class WhatsAppAdapter(BasePlatformAdapter):
             return None
 
         message = f"WhatsApp bridge process exited unexpectedly (code {returncode})."
+        self._bridge_process = None
         if not self.has_fatal_error:
-            logger.error("[%s] %s", self.name, message)
-            self._set_fatal_error("whatsapp_bridge_exited", message, retryable=True)
+            logger.warning("[%s] %s", self.name, message)
             self._close_bridge_log()
-            await self._notify_fatal_error()
+            if self._http_session and not self._http_session.closed:
+                await self._http_session.close()
+            self._http_session = None
+            self._release_platform_lock()
+            self._schedule_bridge_reconnect(message)
+            self._mark_disconnected()
+            return self._BRIDGE_RESTARTING_SENTINEL
         return self.fatal_error_message or message
 
     async def disconnect(self) -> None:
@@ -591,6 +603,15 @@ class WhatsAppAdapter(BasePlatformAdapter):
             except (asyncio.CancelledError, Exception):
                 pass
         self._poll_task = None
+
+        bridge_reconnect_task = getattr(self, "_bridge_reconnect_task", None)
+        if bridge_reconnect_task and not bridge_reconnect_task.done():
+            bridge_reconnect_task.cancel()
+            try:
+                await bridge_reconnect_task
+            except (asyncio.CancelledError, Exception):
+                pass
+        self._bridge_reconnect_task = None
 
         # Close the persistent HTTP session
         if self._http_session and not self._http_session.closed:
@@ -677,6 +698,8 @@ class WhatsAppAdapter(BasePlatformAdapter):
             return SendResult(success=False, error="Not connected")
         bridge_exit = await self._check_managed_bridge_exit()
         if bridge_exit:
+            if bridge_exit == self._BRIDGE_RESTARTING_SENTINEL:
+                return SendResult(success=False, error="WhatsApp bridge is reconnecting")
             return SendResult(success=False, error=bridge_exit)
 
         if not content or not content.strip():
@@ -735,6 +758,8 @@ class WhatsAppAdapter(BasePlatformAdapter):
             return SendResult(success=False, error="Not connected")
         bridge_exit = await self._check_managed_bridge_exit()
         if bridge_exit:
+            if bridge_exit == self._BRIDGE_RESTARTING_SENTINEL:
+                return SendResult(success=False, error="WhatsApp bridge is reconnecting")
             return SendResult(success=False, error=bridge_exit)
         try:
             import aiohttp
@@ -768,6 +793,8 @@ class WhatsAppAdapter(BasePlatformAdapter):
             return SendResult(success=False, error="Not connected")
         bridge_exit = await self._check_managed_bridge_exit()
         if bridge_exit:
+            if bridge_exit == self._BRIDGE_RESTARTING_SENTINEL:
+                return SendResult(success=False, error="WhatsApp bridge is reconnecting")
             return SendResult(success=False, error=bridge_exit)
         try:
             import aiohttp
@@ -870,7 +897,8 @@ class WhatsAppAdapter(BasePlatformAdapter):
         """Send typing indicator via bridge."""
         if not self._running or not self._http_session:
             return
-        if await self._check_managed_bridge_exit():
+        bridge_exit = await self._check_managed_bridge_exit()
+        if bridge_exit:
             return
         
         try:
@@ -888,7 +916,8 @@ class WhatsAppAdapter(BasePlatformAdapter):
         """Get information about a WhatsApp chat."""
         if not self._running or not self._http_session:
             return {"name": "Unknown", "type": "dm"}
-        if await self._check_managed_bridge_exit():
+        bridge_exit = await self._check_managed_bridge_exit()
+        if bridge_exit:
             return {"name": chat_id, "type": "dm"}
         
         try:
@@ -919,6 +948,8 @@ class WhatsAppAdapter(BasePlatformAdapter):
                 break
             bridge_exit = await self._check_managed_bridge_exit()
             if bridge_exit:
+                if bridge_exit == self._BRIDGE_RESTARTING_SENTINEL:
+                    break
                 print(f"[{self.name}] {bridge_exit}")
                 break
             try:
@@ -937,6 +968,8 @@ class WhatsAppAdapter(BasePlatformAdapter):
             except Exception as e:
                 bridge_exit = await self._check_managed_bridge_exit()
                 if bridge_exit:
+                    if bridge_exit == self._BRIDGE_RESTARTING_SENTINEL:
+                        break
                     print(f"[{self.name}] {bridge_exit}")
                     break
                 print(f"[{self.name}] Poll error: {e}")
@@ -975,7 +1008,6 @@ class WhatsAppAdapter(BasePlatformAdapter):
                 user_id=data.get("senderId"),
                 user_name=data.get("senderName"),
             )
-            
             # Download media URLs to the local cache so agent tools
             # can access them reliably regardless of URL expiration.
             raw_urls = data.get("mediaUrls", [])
